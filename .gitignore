@@ -1,6 +1,7 @@
 data/
 shared/
 logs/
+videos/
 .gradle/
 *.pyc
 

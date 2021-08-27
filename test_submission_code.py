@@ -2,6 +2,7 @@ import numpy as np
 import gym
 import torch as th
 from torch import nn
+from model import ResNet
 
 MAX_TEST_EPISODE_LEN = 18000  # 18k is the default for MineRLObtainDiamond.
 TREECHOP_STEPS = 2000  # number of steps to run BC lumberjack for in evaluations.
@@ -14,6 +15,7 @@ class EpisodeDone(Exception):
 # !!! Do not change this! This is part of the submission kit !!!
 class Episode(gym.Env):
     """A class for a single episode."""
+
     def __init__(self, env):
         self.env = env
         self.action_space = env.action_space
@@ -31,42 +33,6 @@ class Episode(gym.Env):
             raise EpisodeDone()
         else:
             return s, r, d, i
-
-class NatureCNN(nn.Module):
-    """
-    CNN from DQN nature paper:
-        Mnih, Volodymyr, et al.
-        "Human-level control through deep reinforcement learning."
-        Nature 518.7540 (2015): 529-533.
-    :param input_shape: A three-item tuple telling image dimensions in (C, H, W)
-    :param output_dim: Dimensionality of the output vector
-    """
-
-    def __init__(self, input_shape, output_dim):
-        super().__init__()
-        n_input_channels = input_shape[0]
-        self.cnn = nn.Sequential(
-            nn.Conv2d(n_input_channels, 32, kernel_size=8, stride=4, padding=0),
-            nn.ReLU(),
-            nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=0),
-            nn.ReLU(),
-            nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=0),
-            nn.ReLU(),
-            nn.Flatten(),
-        )
-
-        # Compute shape by doing one forward pass
-        with th.no_grad():
-            n_flatten = self.cnn(th.zeros(1, *input_shape)).shape[1]
-
-        self.linear = nn.Sequential(
-            nn.Linear(n_flatten, 512),
-            nn.ReLU(),
-            nn.Linear(512, output_dim)
-        )
-
-    def forward(self, observations: th.Tensor) -> th.Tensor:
-        return self.linear(self.cnn(observations))
 
 
 class ActionShaping(gym.ActionWrapper):
@@ -96,25 +62,26 @@ class ActionShaping(gym.ActionWrapper):
     discrete. You can change these actions by changing self._actions below. That should just work with the RL agent,
     but would require some further tinkering below with the BC one.
     """
+
     def __init__(self, env, camera_angle=10, always_attack=False):
         super().__init__(env)
 
         self.camera_angle = camera_angle
         self.always_attack = always_attack
         self._actions = [
-            [('attack', 1)],
-            [('forward', 1)],
+            [("attack", 1)],
+            [("forward", 1)],
             # [('back', 1)],
             # [('left', 1)],
             # [('right', 1)],
             # [('jump', 1)],
             # [('forward', 1), ('attack', 1)],
             # [('craft', 'planks')],
-            [('forward', 1), ('jump', 1)],
-            [('camera', [-self.camera_angle, 0])],
-            [('camera', [self.camera_angle, 0])],
-            [('camera', [0, self.camera_angle])],
-            [('camera', [0, -self.camera_angle])],
+            [("forward", 1), ("jump", 1)],
+            [("camera", [-self.camera_angle, 0])],
+            [("camera", [self.camera_angle, 0])],
+            [("camera", [0, self.camera_angle])],
+            [("camera", [0, -self.camera_angle])],
         ]
 
         self.actions = []
@@ -123,7 +90,7 @@ class ActionShaping(gym.ActionWrapper):
             for a, v in actions:
                 act[a] = v
             if self.always_attack:
-                act['attack'] = 1
+                act["attack"] = 1
             self.actions.append(act)
 
         self.action_space = gym.spaces.Discrete(len(self.actions))
@@ -193,8 +160,8 @@ def str_to_act(env, actions):
     act = env.action_space.noop()
     for action in actions.split():
         if ":" in action:
-            k, v = action.split(':')
-            if k == 'camera':
+            k, v = action.split(":")
+            if k == "camera":
                 act[k] = eval(v)
             else:
                 act[k] = v
@@ -209,34 +176,34 @@ def get_action_sequence():
     """
     # make planks, sticks, crafting table and wooden pickaxe:
     action_sequence = []
-    action_sequence += [''] * 100
-    action_sequence += ['craft:planks'] * 4
-    action_sequence += ['craft:stick'] * 2
-    action_sequence += ['craft:crafting_table']
-    action_sequence += ['camera:[10,0]'] * 18
-    action_sequence += ['attack'] * 20
-    action_sequence += [''] * 10
-    action_sequence += ['jump']
-    action_sequence += [''] * 5
-    action_sequence += ['place:crafting_table']
-    action_sequence += [''] * 10
+    action_sequence += [""] * 100
+    action_sequence += ["craft:planks"] * 4
+    action_sequence += ["craft:stick"] * 2
+    action_sequence += ["craft:crafting_table"]
+    action_sequence += ["camera:[10,0]"] * 18
+    action_sequence += ["attack"] * 20
+    action_sequence += [""] * 10
+    action_sequence += ["jump"]
+    action_sequence += [""] * 5
+    action_sequence += ["place:crafting_table"]
+    action_sequence += [""] * 10
 
     # bug: looking straight down at a crafting table doesn't let you craft. So we look up a bit before crafting.
-    action_sequence += ['camera:[-1,0]']
-    action_sequence += ['nearbyCraft:wooden_pickaxe']
-    action_sequence += ['camera:[1,0]']
-    action_sequence += [''] * 10
-    action_sequence += ['equip:wooden_pickaxe']
-    action_sequence += [''] * 10
+    action_sequence += ["camera:[-1,0]"]
+    action_sequence += ["nearbyCraft:wooden_pickaxe"]
+    action_sequence += ["camera:[1,0]"]
+    action_sequence += [""] * 10
+    action_sequence += ["equip:wooden_pickaxe"]
+    action_sequence += [""] * 10
 
     # dig down:
-    action_sequence += ['attack'] * 600
-    action_sequence += [''] * 10
+    action_sequence += ["attack"] * 600
+    action_sequence += [""] * 10
 
     return action_sequence
 
 
-class MineRLAgent():
+class MineRLAgent:
     """
     To compete in the competition, you are required to implement the two
     functions in this class:
@@ -265,8 +232,10 @@ class MineRLAgent():
         #       that rise when code structure changes (which happens if you train the model with
         #       the baseline code and try to import it here).
         # The good thing is that we know exactly what the input shape and output shapes should be
-        self.network = NatureCNN((3, 64, 64), 7).cuda()
-        self.network.load_state_dict(th.load("./train/another_potato_state_dict.pth"))
+        self.network = ResNet((3, 64, 64), 7).cuda()
+        self.network.load_state_dict(
+            th.load("./train/behavioural_cloning_state_dict.pth")
+        )
 
     def run_agent_on_episode(self, single_episode_env: Episode):
         """This method runs your agent on a SINGLE episode.
@@ -306,7 +275,9 @@ class MineRLAgent():
             #   - Add/remove batch dimensions
             #   - Transpose image (needs to be channels-last)
             #   - Normalize image
-            obs = th.from_numpy(obs['pov'].transpose(2, 0, 1)[None].astype(np.float32) / 255).cuda()
+            obs = th.from_numpy(
+                obs["pov"].transpose(2, 0, 1)[None].astype(np.float32) / 255
+            ).cuda()
             # Turn logits into probabilities
             probabilities = th.softmax(self.network(obs), dim=1)[0]
             # Into numpy
@@ -322,7 +293,9 @@ class MineRLAgent():
 
         # scripted part to use the logs:
         if not done:
-            for i, action in enumerate(action_sequence[:MAX_TEST_EPISODE_LEN - TREECHOP_STEPS]):
+            for i, action in enumerate(
+                action_sequence[: MAX_TEST_EPISODE_LEN - TREECHOP_STEPS]
+            ):
                 obs, reward, done, _ = env1.step(str_to_act(env1, action))
                 total_reward += reward
                 steps += 1

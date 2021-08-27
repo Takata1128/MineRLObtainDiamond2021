@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # NeurIPS 2021: MineRL Competition. Intro track baseline submission kit.
 
 [![Discord](https://img.shields.io/discord/565639094860775436.svg)](https://discord.gg/BT9uegr)
@@ -31,4 +30,3 @@ Here is a list things that were modified over the [submission template](https://
 # minerl-intro
 
 minerl intro track
->>>>>>> aicrowd/master

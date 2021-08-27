@@ -1,7 +1,9 @@
 {
   "challenge_id": "neurips-2021-minerl-diamond-competition",
-  "authors": ["Organizers"],
+  "authors": [
+    "soichiro_takata"
+  ],
   "tags": "intro",
-  "description": "A baseline solution using scripted behaviour and behavioural cloning",
+  "description": "Behavioural cloning",
   "gpu": true
 }
