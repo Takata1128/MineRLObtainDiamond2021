@@ -1,8 +1,12 @@
 import numpy as np
 import gym
-import torch as th
+import torch
 from torch import nn
-from model import ResNet
+import os
+from behavior_cloning.net.model import ResNetImpala
+from behavior_cloning.wrappers.action_wrappers import ObtainDiamondActions
+from behavior_cloning.wrappers.observation_wrappers import ObtainDiamondObservation
+
 
 MAX_TEST_EPISODE_LEN = 18000  # 18k is the default for MineRLObtainDiamond.
 TREECHOP_STEPS = 2000  # number of steps to run BC lumberjack for in evaluations.
@@ -35,174 +39,6 @@ class Episode(gym.Env):
             return s, r, d, i
 
 
-class ActionShaping(gym.ActionWrapper):
-    """
-    The default MineRL action space is the following dict:
-    Dict(attack:Discrete(2),
-         back:Discrete(2),
-         camera:Box(low=-180.0, high=180.0, shape=(2,)),
-         craft:Enum(crafting_table,none,planks,stick,torch),
-         equip:Enum(air,iron_axe,iron_pickaxe,none,stone_axe,stone_pickaxe,wooden_axe,wooden_pickaxe),
-         forward:Discrete(2),
-         jump:Discrete(2),
-         left:Discrete(2),
-         nearbyCraft:Enum(furnace,iron_axe,iron_pickaxe,none,stone_axe,stone_pickaxe,wooden_axe,wooden_pickaxe),
-         nearbySmelt:Enum(coal,iron_ingot,none),
-         place:Enum(cobblestone,crafting_table,dirt,furnace,none,stone,torch),
-         right:Discrete(2),
-         sneak:Discrete(2),
-         sprint:Discrete(2))
-    It can be viewed as:
-         - buttons, like attack, back, forward, sprint that are either pressed or not.
-         - mouse, i.e. the continuous camera action in degrees. The two values are pitch (up/down), where up is
-           negative, down is positive, and yaw (left/right), where left is negative, right is positive.
-         - craft/equip/place actions for items specified above.
-    So an example action could be sprint + forward + jump + attack + turn camera, all in one action.
-    This wrapper makes the action space much smaller by selecting a few common actions and making the camera actions
-    discrete. You can change these actions by changing self._actions below. That should just work with the RL agent,
-    but would require some further tinkering below with the BC one.
-    """
-
-    def __init__(self, env, camera_angle=10, always_attack=False):
-        super().__init__(env)
-
-        self.camera_angle = camera_angle
-        self.always_attack = always_attack
-        self._actions = [
-            [("attack", 1)],
-            [("forward", 1)],
-            # [('back', 1)],
-            # [('left', 1)],
-            # [('right', 1)],
-            # [('jump', 1)],
-            # [('forward', 1), ('attack', 1)],
-            # [('craft', 'planks')],
-            [("forward", 1), ("jump", 1)],
-            [("camera", [-self.camera_angle, 0])],
-            [("camera", [self.camera_angle, 0])],
-            [("camera", [0, self.camera_angle])],
-            [("camera", [0, -self.camera_angle])],
-        ]
-
-        self.actions = []
-        for actions in self._actions:
-            act = self.env.action_space.noop()
-            for a, v in actions:
-                act[a] = v
-            if self.always_attack:
-                act["attack"] = 1
-            self.actions.append(act)
-
-        self.action_space = gym.spaces.Discrete(len(self.actions))
-
-    def action(self, action):
-        return self.actions[action]
-
-
-def dataset_action_batch_to_actions(dataset_actions, camera_margin=5):
-    """
-    Turn a batch of actions from dataset (`batch_iter`) to a numpy
-    array that corresponds to batch of actions of ActionShaping wrapper (_actions).
-    Camera margin sets the threshold what is considered "moving camera".
-    Note: Hardcoded to work for actions in ActionShaping._actions, with "intuitive"
-        ordering of actions.
-        If you change ActionShaping._actions, remember to change this!
-    Array elements are integers corresponding to actions, or "-1"
-    for actions that did not have any corresponding discrete match.
-    """
-    # There are dummy dimensions of shape one
-    camera_actions = dataset_actions["camera"].squeeze()
-    attack_actions = dataset_actions["attack"].squeeze()
-    forward_actions = dataset_actions["forward"].squeeze()
-    jump_actions = dataset_actions["jump"].squeeze()
-    batch_size = len(camera_actions)
-    actions = np.zeros((batch_size,), dtype=np.int)
-
-    for i in range(len(camera_actions)):
-        # Moving camera is most important (horizontal first)
-        if camera_actions[i][0] < -camera_margin:
-            actions[i] = 3
-        elif camera_actions[i][0] > camera_margin:
-            actions[i] = 4
-        elif camera_actions[i][1] > camera_margin:
-            actions[i] = 5
-        elif camera_actions[i][1] < -camera_margin:
-            actions[i] = 6
-        elif forward_actions[i] == 1:
-            if jump_actions[i] == 1:
-                actions[i] = 2
-            else:
-                actions[i] = 1
-        elif attack_actions[i] == 1:
-            actions[i] = 0
-        else:
-            # No reasonable mapping (would be no-op)
-            actions[i] = -1
-    return actions
-
-
-def str_to_act(env, actions):
-    """
-    Simplifies specifying actions for the scripted part of the agent.
-    Some examples for a string with a single action:
-        'craft:planks'
-        'camera:[10,0]'
-        'attack'
-        'jump'
-        ''
-    There should be no spaces in single actions, as we use spaces to separate actions with multiple "buttons" pressed:
-        'attack sprint forward'
-        'forward camera:[0,10]'
-    :param env: base MineRL environment.
-    :param actions: string of actions.
-    :return: dict action, compatible with the base MineRL environment.
-    """
-    act = env.action_space.noop()
-    for action in actions.split():
-        if ":" in action:
-            k, v = action.split(":")
-            if k == "camera":
-                act[k] = eval(v)
-            else:
-                act[k] = v
-        else:
-            act[action] = 1
-    return act
-
-
-def get_action_sequence():
-    """
-    Specify the action sequence for the scripted part of the agent.
-    """
-    # make planks, sticks, crafting table and wooden pickaxe:
-    action_sequence = []
-    action_sequence += [""] * 100
-    action_sequence += ["craft:planks"] * 4
-    action_sequence += ["craft:stick"] * 2
-    action_sequence += ["craft:crafting_table"]
-    action_sequence += ["camera:[10,0]"] * 18
-    action_sequence += ["attack"] * 20
-    action_sequence += [""] * 10
-    action_sequence += ["jump"]
-    action_sequence += [""] * 5
-    action_sequence += ["place:crafting_table"]
-    action_sequence += [""] * 10
-
-    # bug: looking straight down at a crafting table doesn't let you craft. So we look up a bit before crafting.
-    action_sequence += ["camera:[-1,0]"]
-    action_sequence += ["nearbyCraft:wooden_pickaxe"]
-    action_sequence += ["camera:[1,0]"]
-    action_sequence += [""] * 10
-    action_sequence += ["equip:wooden_pickaxe"]
-    action_sequence += [""] * 10
-
-    # dig down:
-    action_sequence += ["attack"] * 600
-    action_sequence += [""] * 10
-
-    return action_sequence
-
-
 class MineRLAgent:
     """
     To compete in the competition, you are required to implement the two
@@ -232,10 +68,18 @@ class MineRLAgent:
         #       that rise when code structure changes (which happens if you train the model with
         #       the baseline code and try to import it here).
         # The good thing is that we know exactly what the input shape and output shapes should be
-        self.network = ResNet((3, 64, 64), 7).cuda()
-        self.network.load_state_dict(
-            th.load("./train/behavioural_cloning_state_dict.pth")
+        action_nvec = [2, 3, 3, 5, 8, 2, 2, 8, 3, 7]
+
+        image_shape = (3, 64, 64)
+        direct_shape = (172,)
+
+        self.model = ResNetImpala(image_shape, action_nvec, True, direct_shape).cuda()
+        self.model.load_state_dict(
+            torch.load(
+                os.path.dirname(__file__) + "/train/imitation_epochs25.pth_steps_315000"
+            )
         )
+        self.model.eval().cuda()
 
     def run_agent_on_episode(self, single_episode_env: Episode):
         """This method runs your agent on a SINGLE episode.
@@ -256,48 +100,57 @@ class MineRLAgent:
             env (gym.Env): The env your agent should interact with.
         """
         env = single_episode_env
-        env = ActionShaping(env, always_attack=True)
-        env1 = env.unwrapped
+
+        obs_processor = ObtainDiamondObservation(env.observation_space)
+        act_processor = ObtainDiamondActions(env.action_space)
 
         obs = env.reset()
         done = False
         total_reward = 0
         steps = 0
 
-        num_actions = env.action_space.n
-        action_list = np.arange(num_actions)
-
-        action_sequence = get_action_sequence()
-
-        # BC part to get some logs:
-        for i in range(TREECHOP_STEPS):
-            # Process the action:
-            #   - Add/remove batch dimensions
-            #   - Transpose image (needs to be channels-last)
-            #   - Normalize image
-            obs = th.from_numpy(
-                obs["pov"].transpose(2, 0, 1)[None].astype(np.float32) / 255
-            ).cuda()
+        while not done:
+            obs = preprocess(obs)
+            obs = obs_processor.dict_to_tuple(obs)
+            logits = self.model(
+                torch.FloatTensor(obs[0]).cuda(), torch.FloatTensor(obs[1]).cuda()
+            )
             # Turn logits into probabilities
-            probabilities = th.softmax(self.network(obs), dim=1)[0]
+            probabilities = []
+            for logit in logits:
+                probabilities.append(torch.softmax(logit, dim=1))
             # Into numpy
-            probabilities = probabilities.detach().cpu().numpy()
-            # Sample action according to the probabilities
-            action = np.random.choice(action_list, p=probabilities)
+            probabilities = [
+                probability.detach().cpu().squeeze().numpy()
+                for probability in probabilities
+            ]
+            agent_action = act_processor.probabilities_to_multidiscrete(probabilities)
+            agent_action = act_processor.multidiscrete_to_dict(agent_action)
 
-            obs, reward, done, info = env.step(action)
+            obs, reward, done, info = env.step(agent_action)
             total_reward += reward
             steps += 1
-            if done:
-                break
 
-        # scripted part to use the logs:
-        if not done:
-            for i, action in enumerate(
-                action_sequence[: MAX_TEST_EPISODE_LEN - TREECHOP_STEPS]
-            ):
-                obs, reward, done, _ = env1.step(str_to_act(env1, action))
-                total_reward += reward
-                steps += 1
-                if done:
-                    break
+
+def preprocess(obs: dict):
+    ret = {}
+
+    def rec_reshape(dic, long_key):
+        if isinstance(dic, dict):
+            for key, val in dic.items():
+                if key == "inventory":
+                    ret[key] = preprocess(dic[key])
+                else:
+                    rec_reshape(
+                        dic[key], long_key + ("" if long_key is "" else ".") + key
+                    )
+        else:
+            if isinstance(dic, np.ndarray):
+                ret[long_key] = dic[np.newaxis, ...]
+            elif isinstance(dic, np.int64):
+                ret[long_key] = np.full((1, 1), dic)
+            else:
+                ret[long_key] = [dic]
+
+    rec_reshape(obs, "")
+    return ret
