@@ -1,5 +1,5 @@
 import os
-from behavior_cloning.training import replay_train
+from behavior_cloning.training import replay_train, sequential_train
 
 # All the evaluations will be evaluated on MineRLObtainDiamond-v0 environment
 MINERL_GYM_ENV = os.getenv("MINERL_GYM_ENV", "MineRLObtainDiamond-v0")
@@ -22,14 +22,14 @@ def main():
         "--save-every-updates",
         "10000",
         MINERL_DATA_ROOT,
-        os.path.dirname(__file__) + "/train/imitation_epochs25.pth",
+        os.path.dirname(__file__) + "/train/value_policy_v0.pth",
         "MineRLObtainDiamond-v0",
         "MineRLObtainIronPickaxe-v0",
     ]
 
     os.makedirs(os.path.dirname(__file__) + "/train", exist_ok=True)
     train_args = replay_train.parser.parse_args(imitation_arguments)
-    replay_train.main(train_args)
+    sequential_train.main(train_args)
 
 
 if __name__ == "__main__":

@@ -10,6 +10,12 @@ sys.path.append(str(Path(__file__).parent.parent.parent))
 from config import COMPONENT_NUMS, ACTION_NVEC, RESIDUAL_CHANNEL_LIST
 
 
+def init(module, weight_init, bias_init, gain=1):
+    weight_init(module.weight.data, gain=gain)
+    bias_init(module.bias.data)
+    return module
+
+
 class ConvNet(nn.Module):
     def __init__(self, input_shape, output_dim):
         super().__init__()
@@ -38,13 +44,21 @@ class ConvNet(nn.Module):
 class ResBlock(nn.Module):
     def __init__(self, in_channels, out_channels):
         super().__init__()
-        self.conv1 = nn.Conv2d(
-            in_channels, out_channels, kernel_size=3, padding=1, stride=1
+
+        init_ = lambda m: init(
+            m,
+            nn.init.orthogonal_,
+            lambda x: nn.init.constant_(x, 0),
+            nn.init.calculate_gain("leaky_relu"),
+        )
+
+        self.conv1 = init_(
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, stride=1)
         )
         self.bn1 = nn.BatchNorm2d(out_channels)
         self.relu1 = nn.LeakyReLU()
-        self.conv2 = nn.Conv2d(
-            out_channels, out_channels, kernel_size=3, padding=1, stride=1
+        self.conv2 = init_(
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1, stride=1)
         )
         self.bn2 = nn.BatchNorm2d(out_channels)
         self.relu2 = nn.LeakyReLU()
@@ -114,14 +128,25 @@ class ResNetImpala(nn.Module):
         self, input_shape, action_nvec, use_direct_input, direct_input_shape=None
     ):
         super().__init__()
+
+        # Residual part -----
+        init_ = lambda m: init(
+            m,
+            nn.init.orthogonal_,
+            lambda x: nn.init.constant_(x, 0),
+            nn.init.calculate_gain("leaky_relu"),
+        )
+
         convs = [
             nn.Sequential(
-                nn.Conv2d(
-                    input_shape[0] if i == 0 else COMPONENT_NUMS[i - 1][0],
-                    num_ch,
-                    kernel_size=3,
-                    padding=1,
-                    stride=1,
+                init_(
+                    nn.Conv2d(
+                        input_shape[0] if i == 0 else COMPONENT_NUMS[i - 1][0],
+                        num_ch,
+                        kernel_size=3,
+                        padding=1,
+                        stride=1,
+                    )
                 ),
                 nn.BatchNorm2d(num_ch),
                 nn.LeakyReLU(),
@@ -141,6 +166,8 @@ class ResNetImpala(nn.Module):
         ]
         self.residual_layers = nn.ModuleList(residual_layers)
 
+        # Head part -----
+
         fc_input_size = COMPONENT_NUMS[-1][0] * input_shape[1] * input_shape[2] // 64
 
         self.use_direct_input = use_direct_input
@@ -151,15 +178,28 @@ class ResNetImpala(nn.Module):
             direct_input_size = direct_input_shape[0]
             direct_features = 256
             self.direct_input_fc = nn.Sequential(
-                nn.Linear(direct_input_size, direct_features), nn.LeakyReLU()
+                init_(nn.Linear(direct_input_size, direct_features)), nn.LeakyReLU()
             )
 
         self.fc = nn.Sequential(
-            nn.Linear(fc_input_size + direct_features, 512), nn.LeakyReLU()
+            init_(nn.Linear(fc_input_size + direct_features, 512)), nn.LeakyReLU()
         )
 
-        output_layers = [nn.Linear(512, actions_n) for actions_n in action_nvec]
-        self.output_layers = nn.ModuleList(output_layers)
+        init_ = lambda m: init(
+            m,
+            nn.init.orthogonal_,
+            lambda x: nn.init.constant_(x, 0),
+        )
+
+        policy_heads = [init_(nn.Linear(512, actions_n)) for actions_n in action_nvec]
+        self.policy_heads = nn.ModuleList(policy_heads)
+        init_ = lambda m: init(
+            m,
+            nn.init.orthogonal_,
+            lambda x: nn.init.constant_(x, 0),
+            nn.init.calculate_gain("tanh"),
+        )
+        self.value_head = nn.Sequential(init_(nn.Linear(512, 1)), nn.Tanh())
 
     def forward(self, x, direct_input=None):
         batch_size = x.shape[0]
@@ -174,5 +214,6 @@ class ResNetImpala(nn.Module):
             h2 = self.direct_input_fc(direct_input)
             h = torch.cat([h, h2], dim=1)
         h = self.fc(h)
-        logits = [output_layer(h) for output_layer in self.output_layers]
-        return logits
+        value = self.value_head(h)
+        logits = [output_layer(h) for output_layer in self.policy_heads]
+        return value, logits

@@ -82,6 +82,8 @@ parser.add_argument(
     help="Do not do horizontal flipping for augmentation.",
 )
 
+N_LOOP = 100
+
 
 # trajectories : [states/action/rewards][batch][seq_len]
 def trajectories_to_replay_memory(trajectories, replay_memory, args):
@@ -117,7 +119,8 @@ def data_preprocessor_worker(
     obs_processor, act_processor, in_queue, out_queue, do_flipping
 ):
     in_sample = None
-    while True:
+
+    for _ in range(N_LOOP):
         try:
             in_sample = in_queue.get(timeout=60)
         except Exception:
@@ -163,7 +166,7 @@ def train_model(model, optimizer, train_inputs, train_outputs, l2_weight=0.0):
         train_inputs[1], device="cuda", dtype=torch.float32
     ).squeeze()
     train_outputs = np.squeeze(train_outputs).transpose(1, 0)
-    logits = model(pov, direct_input)
+    _, logits = model(pov, direct_input)
     ce_loss, l2_loss = calc_loss(logits, train_outputs, model.parameters())
     loss = ce_loss + l2_weight * l2_loss
     optimizer.zero_grad()
@@ -251,6 +254,22 @@ def main(args):
         except StopIteration:
             break
 
+        # プロセスの再起動
+        for worker in data_workers:
+            if not worker.is_alive():
+                worker.terminate()
+                worker = Process(
+                    target=data_preprocessor_worker,
+                    args=(
+                        obs_processor,
+                        act_processor,
+                        raw_data_queue,
+                        processed_data_queue,
+                        not args.no_flipping,
+                    ),
+                )
+                worker.start()
+
         if processed_data_queue.qsize() >= args.seqs_per_update:
             trajectories = [
                 processed_data_queue.get(timeout=30)
@@ -262,7 +281,6 @@ def main(args):
                 train_inputs, train_outputs = get_training_batch(
                     replay_memory, args.batch_size
                 )
-
                 # train_model
                 loss_value = train_model(
                     model, optimizer, train_inputs, train_outputs, args.l2

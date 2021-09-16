@@ -76,7 +76,7 @@ class MineRLAgent:
         self.model = ResNetImpala(image_shape, action_nvec, True, direct_shape).cuda()
         self.model.load_state_dict(
             torch.load(
-                os.path.dirname(__file__) + "/train/imitation_epochs25.pth_steps_315000"
+                os.path.dirname(__file__) + "/train/value_policy_v0.pth_steps_2060000"
             )
         )
         self.model.eval().cuda()
@@ -112,7 +112,7 @@ class MineRLAgent:
         while not done:
             obs = preprocess(obs)
             obs = obs_processor.dict_to_tuple(obs)
-            logits = self.model(
+            value, logits = self.model(
                 torch.FloatTensor(obs[0]).cuda(), torch.FloatTensor(obs[1]).cuda()
             )
             # Turn logits into probabilities
