@@ -18,13 +18,14 @@ MINERL_DATA_ROOT = os.getenv("MINERL_DATA_ROOT", os.path.dirname(__file__) + "/d
 def main():
     imitation_arguments = [
         "--epochs",
-        "25",
+        "100",
         "--save-every-updates",
-        "10000",
+        "20000",
         MINERL_DATA_ROOT,
-        os.path.dirname(__file__) + "/train/value_policy_v0.pth",
+        os.path.dirname(__file__) + "/train/discrete_v0.pth_steps_250000",
         "MineRLObtainDiamond-v0",
         "MineRLObtainIronPickaxe-v0",
+        "--no-flipping",
     ]
 
     os.makedirs(os.path.dirname(__file__) + "/train", exist_ok=True)

@@ -3,17 +3,25 @@ from torch import nn
 import numpy as np
 import torch.nn.functional as F
 from torch.nn.modules.container import Sequential
+from pfrl.policies import SoftmaxCategoricalHead
 import sys
+import pfrl
 from pathlib import Path
 
 sys.path.append(str(Path(__file__).parent.parent.parent))
 from config import COMPONENT_NUMS, ACTION_NVEC, RESIDUAL_CHANNEL_LIST
 
 
-def init(module, weight_init, bias_init, gain=1):
-    weight_init(module.weight.data, gain=gain)
-    bias_init(module.bias.data)
-    return module
+def lecun_init(layer, gain=1):
+    if isinstance(layer, (nn.Conv2d, nn.Linear)):
+        pfrl.initializers.init_lecun_normal(layer.weight, gain)
+        nn.init.zeros_(layer.bias)
+    else:
+        pfrl.initializers.init_lecun_normal(layer.weight_ih_l0, gain)
+        pfrl.initializers.init_lecun_normal(layer.weight_hh_l0, gain)
+        nn.init.zeros_(layer.bias_ih_l0)
+        nn.init.zeros_(layer.bias_hh_l0)
+    return layer
 
 
 class ConvNet(nn.Module):
@@ -45,19 +53,12 @@ class ResBlock(nn.Module):
     def __init__(self, in_channels, out_channels):
         super().__init__()
 
-        init_ = lambda m: init(
-            m,
-            nn.init.orthogonal_,
-            lambda x: nn.init.constant_(x, 0),
-            nn.init.calculate_gain("leaky_relu"),
-        )
-
-        self.conv1 = init_(
+        self.conv1 = lecun_init(
             nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, stride=1)
         )
         self.bn1 = nn.BatchNorm2d(out_channels)
         self.relu1 = nn.LeakyReLU()
-        self.conv2 = init_(
+        self.conv2 = lecun_init(
             nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1, stride=1)
         )
         self.bn2 = nn.BatchNorm2d(out_channels)
@@ -73,10 +74,6 @@ class ResBlock(nn.Module):
         return y
 
 
-DN_FILTERS = 32
-RESIDUAL_NUM = 3
-
-
 class GlobalAvgPool2d(nn.Module):
     def __init__(self):
         super().__init__()
@@ -85,61 +82,54 @@ class GlobalAvgPool2d(nn.Module):
         return F.avg_pool2d(x, kernel_size=x.size()[2:]).view(-1, x.size(1))
 
 
-class ResNet(nn.Module):
-    def __init__(self, input_shape, actions_n):
-        super().__init__()
-        self.conv_in = nn.Sequential(
-            nn.Conv2d(input_shape[0], DN_FILTERS, kernel_size=3, padding=1, stride=1),
-            nn.BatchNorm2d(DN_FILTERS),
-            nn.LeakyReLU(),
-        )
+# class ResNet(nn.Module):
+#     def __init__(self, input_shape, actions_n):
+#         super().__init__()
+#         self.conv_in = nn.Sequential(
+#             nn.Conv2d(input_shape[0], DN_FILTERS, kernel_size=3, padding=1, stride=1),
+#             nn.BatchNorm2d(DN_FILTERS),
+#             nn.LeakyReLU(),
+#         )
 
-        layers = [ResBlock(DN_FILTERS) for _ in range(RESIDUAL_NUM)]
-        self.residual_layers = nn.ModuleList(layers)
-        body_out_shape = (DN_FILTERS,) + input_shape[1:]
+#         layers = [ResBlock(DN_FILTERS) for _ in range(RESIDUAL_NUM)]
+#         self.residual_layers = nn.ModuleList(layers)
+#         body_out_shape = (DN_FILTERS,) + input_shape[1:]
 
-        self.conv_policy = nn.Sequential(
-            nn.Conv2d(DN_FILTERS, 2, kernel_size=1), nn.BatchNorm2d(2), nn.LeakyReLU()
-        )
-        self.avg_pool = GlobalAvgPool2d()
-        conv_policy_size = self._get_conv_policy_size(body_out_shape)
-        self.policy = nn.Sequential(
-            nn.Linear(conv_policy_size, actions_n), nn.Softmax(dim=1)
-        )
+#         self.conv_policy = nn.Sequential(
+#             nn.Conv2d(DN_FILTERS, 2, kernel_size=1), nn.BatchNorm2d(2), nn.LeakyReLU()
+#         )
+#         self.avg_pool = GlobalAvgPool2d()
+#         conv_policy_size = self._get_conv_policy_size(body_out_shape)
+#         self.policy = nn.Sequential(
+#             nn.Linear(conv_policy_size, actions_n), nn.Softmax(dim=1)
+#         )
 
-    def _get_conv_policy_size(self, shape):
-        o = self.conv_policy(torch.zeros(1, *shape))
-        o = self.avg_pool(o)
-        return int(np.prod(o.size()))
+#     def _get_conv_policy_size(self, shape):
+#         o = self.conv_policy(torch.zeros(1, *shape))
+#         o = self.avg_pool(o)
+#         return int(np.prod(o.size()))
 
-    def forward(self, x):
-        batch_size = x.size()[0]
-        h = self.conv_in(x)
-        for layer in self.residual_layers:
-            h = layer(h)
-        h = self.conv_policy(h)
-        h = self.avg_pool(h)
-        pol = self.policy(h.view(batch_size, -1))
-        return pol
+#     def forward(self, x):
+#         batch_size = x.size()[0]
+#         h = self.conv_in(x)
+#         for layer in self.residual_layers:
+#             h = layer(h)
+#         h = self.conv_policy(h)
+#         h = self.avg_pool(h)
+#         pol = self.policy(h.view(batch_size, -1))
+#         return pol
 
 
 class ResNetImpala(nn.Module):
     def __init__(
-        self, input_shape, action_nvec, use_direct_input, direct_input_shape=None
+        self, input_shape, action_n, use_direct_input, direct_input_shape=None
     ):
         super().__init__()
 
         # Residual part -----
-        init_ = lambda m: init(
-            m,
-            nn.init.orthogonal_,
-            lambda x: nn.init.constant_(x, 0),
-            nn.init.calculate_gain("leaky_relu"),
-        )
-
         convs = [
             nn.Sequential(
-                init_(
+                lecun_init(
                     nn.Conv2d(
                         input_shape[0] if i == 0 else COMPONENT_NUMS[i - 1][0],
                         num_ch,
@@ -178,30 +168,24 @@ class ResNetImpala(nn.Module):
             direct_input_size = direct_input_shape[0]
             direct_features = 256
             self.direct_input_fc = nn.Sequential(
-                init_(nn.Linear(direct_input_size, direct_features)), nn.LeakyReLU()
+                lecun_init(nn.Linear(direct_input_size, direct_features)),
+                nn.LeakyReLU(),
             )
 
         self.fc = nn.Sequential(
-            init_(nn.Linear(fc_input_size + direct_features, 512)), nn.LeakyReLU()
+            lecun_init(nn.Linear(fc_input_size + direct_features, 512)), nn.LeakyReLU()
         )
 
-        init_ = lambda m: init(
-            m,
-            nn.init.orthogonal_,
-            lambda x: nn.init.constant_(x, 0),
+        self.head = pfrl.nn.Branched(
+            nn.Sequential(
+                lecun_init(nn.Linear(512, action_n), 1e-2),
+                SoftmaxCategoricalHead(),
+            ),
+            lecun_init(nn.Linear(512, 1)),
         )
 
-        policy_heads = [init_(nn.Linear(512, actions_n)) for actions_n in action_nvec]
-        self.policy_heads = nn.ModuleList(policy_heads)
-        init_ = lambda m: init(
-            m,
-            nn.init.orthogonal_,
-            lambda x: nn.init.constant_(x, 0),
-            nn.init.calculate_gain("tanh"),
-        )
-        self.value_head = nn.Sequential(init_(nn.Linear(512, 1)), nn.Tanh())
-
-    def forward(self, x, direct_input=None):
+    def forward(self, features):
+        x, direct_features = features
         batch_size = x.shape[0]
         h = x
         for i, res_layers in enumerate(self.residual_layers):
@@ -211,9 +195,8 @@ class ResNetImpala(nn.Module):
                 h = layer(h)
         h = h.reshape(batch_size, -1)
         if self.use_direct_input:
-            h2 = self.direct_input_fc(direct_input)
+            h2 = self.direct_input_fc(direct_features)
             h = torch.cat([h, h2], dim=1)
         h = self.fc(h)
-        value = self.value_head(h)
-        logits = [output_layer(h) for output_layer in self.policy_heads]
-        return value, logits
+        distribs, value = self.head(h)
+        return distribs, value

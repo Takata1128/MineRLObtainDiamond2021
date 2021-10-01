@@ -2,9 +2,7 @@ from argparse import ArgumentParser
 from typing import Dict
 import minerl
 from itertools import cycle
-import sys
 import os
-import queue
 
 import torch
 
@@ -82,24 +80,20 @@ parser.add_argument(
     help="Do not do horizontal flipping for augmentation.",
 )
 
-N_LOOP = 100
-
 
 # trajectories : [states/action/rewards][batch][seq_len]
 def trajectories_to_replay_memory(trajectories, replay_memory, args):
     for trajectory in trajectories:
         states, actions, rewards = trajectory
         for i in range(len(states) - 1, -1, -1):
-            # for j in range(len(states[i])):
             # skip no-ops
-            # if sum(actions[i][j]) == 0:
-            #     continue
+            if actions[i] == 0:
+                continue
             replay_memory.add((states[i], actions[i]))
 
 
 def get_training_batch(replay_memory, batch_size):
     raw_batch = replay_memory.get_batch(batch_size)
-
     inputs = None
     outputs = None
 
@@ -124,15 +118,7 @@ def process_data(in_sample, obs_processor, act_processor, do_flipping):
     actions = unzip_states_or_actions(actions)
 
     states = list(map(lambda state: obs_processor.dict_to_tuple(state), states))
-    actions = list(
-        map(lambda action: act_processor.dict_to_multidiscrete(action), actions)
-    )
-
-    if do_flipping:
-        for state, action in zip(states, actions):
-            if random.random() < 0.5:
-                obs_processor.flip_left_right(state)
-                act_processor.flip_left_right(action)
+    actions = list(map(lambda action: act_processor.dict_to_discrete(action), actions))
 
     return [states, actions, rewards]
 
@@ -140,8 +126,9 @@ def process_data(in_sample, obs_processor, act_processor, do_flipping):
 def calc_loss(logits, out_y, parameters):
     ce_loss = 0
     l2_loss = torch.tensor(0.0, requires_grad=True)
-    for logit, y in zip(logits, out_y):
-        ce_loss += torch.nn.CrossEntropyLoss()(logit, torch.from_numpy(y).long().cuda())
+    ce_loss += torch.nn.CrossEntropyLoss()(
+        logits, torch.squeeze(torch.from_numpy(out_y).long().cuda())
+    )
     for w in parameters:
         l2_loss = l2_loss + torch.norm(w) ** 2
     return ce_loss, l2_loss
@@ -152,9 +139,8 @@ def train_model(model, optimizer, train_inputs, train_outputs, l2_weight=0.0):
     direct_input = torch.tensor(
         train_inputs[1], device="cuda", dtype=torch.float32
     ).squeeze()
-    train_outputs = np.squeeze(train_outputs).transpose(1, 0)
-    _, logits = model(pov, direct_input)
-    ce_loss, l2_loss = calc_loss(logits, train_outputs, model.parameters())
+    distribs, _ = model((pov, direct_input))
+    ce_loss, l2_loss = calc_loss(distribs.logits, train_outputs, model.parameters())
     loss = ce_loss + l2_weight * l2_loss
     optimizer.zero_grad()
     loss.backward()
@@ -164,6 +150,7 @@ def train_model(model, optimizer, train_inputs, train_outputs, l2_weight=0.0):
 
 def main(args):
     workers_per_loader = args.workers // len(args.datasets)
+
     data_loaders = [
         minerl.data.make(
             dataset, data_dir=args.data_dir, num_workers=workers_per_loader
@@ -179,11 +166,11 @@ def main(args):
     )
 
     act_processor = ObtainDiamondActions(data_loaders[0].action_space)
-    action_nvec = act_processor.action_space.nvec
+    action_n = act_processor.action_space.n
     image_shape = obs_processor.observation_space[0].shape
     direct_shape = obs_processor.observation_space[1].shape
 
-    model = ResNetImpala(image_shape, action_nvec, True, direct_shape).cuda()
+    model = ResNetImpala(image_shape, action_n, True, direct_shape).cuda()
     if os.path.exists(args.model):
         model.load_state_dict(torch.load(args.model))
         model.eval()
@@ -193,10 +180,8 @@ def main(args):
 
     data_iterators = cycle(
         [
-            data.batch_iter(
-                batch_size=args.batch_size,
-                num_epochs=args.epochs,
-                seq_len=args.max_seqlen,
+            minerl.data.BufferedBatchIter(data).buffered_batch_iter(
+                batch_size=args.batch_size, num_epochs=args.epochs
             )
             for data in data_loaders
         ]
@@ -222,7 +207,6 @@ def main(args):
             states, acts, rewards, state_primes, dones = next(data_iterator)
         except StopIteration:
             break
-
         trajectories.append(
             process_data(
                 [states, acts, rewards],
@@ -253,15 +237,12 @@ def main(args):
                         time_passed, num_updates, np.mean(average_losses)
                     )
                 )
-                print("The length of RM: {}".format(len(replay_memory)))
-
             if (num_updates - last_save_updates) >= args.save_every_updates:
                 torch.save(
                     model.state_dict(), args.model + "_steps_{}".format(num_updates)
                 )
                 last_save_updates = num_updates
-
-    model.save(args.model)
+    torch.save(model.state_dict(), args.model + "_steps_{}".format(num_updates))
 
 
 if __name__ == "__main__":

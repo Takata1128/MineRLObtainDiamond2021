@@ -11,8 +11,12 @@ MAX_INT_ONEHOT = 8
 
 
 def one_hot_encode(value, num_possibilities):
-    one_hot = np.zeros([value.shape[0], num_possibilities])
-    one_hot[:, value] = 1
+    one_hot = np.zeros(
+        [
+            num_possibilities,
+        ]
+    )
+    one_hot[value] = 1
     return one_hot
 
 
@@ -94,33 +98,41 @@ class ObtainDiamondObservation:
                 low=0, high=1, shape=pov_shape, dtype=np.float32
             )
 
-    def flip_left_right(self, obs):
-        obs[0][:] = np.fliplr(obs[0])
-
     def dict_to_tuple(self, dict_obs):
-        if len(dict_obs["pov"].shape) == 3:
-            for key, val in dict_obs.items():
-                val.reshape(1, -1)
-
         # normalize
         pov_obs = dict_obs["pov"].astype(np.float32) / 255.0
-        pov_obs = pov_obs.transpose(0, 3, 1, 2)
+        pov_obs = pov_obs.transpose(2, 0, 1)
         # apply gamma correction
         if self.inverse_gamma != 1.0:
             pov_obs = pov_obs ** self.inverse_gamma
 
         direct_features = []
         # Mainhand
-        damage = dict_obs["equipped_items.mainhand.damage"]
-        max_damage = np.maximum(1, dict_obs["equipped_items.mainhand.maxDamage"])
-        damage_ratio = damage / max_damage
-        direct_features.append(
-            damage_ratio.reshape(damage_ratio.shape[0], 1),
+        # データセットの仕様がデータによって違う！？
+        damage = None
+        max_damage = None
+        mainhand_str = None
+
+        if "equipped_items" in dict_obs:
+            damage = dict_obs["equipped_items"]["mainhand"]["damage"]
+            max_damage = np.maximum(
+                1, dict_obs["equipped_items"]["mainhand"]["maxDamage"]
+            )
+            mainhand_str = dict_obs["equipped_items"]["mainhand"]["type"]
+        else:
+            damage = dict_obs["equipped_items.mainhand.damage"]
+            max_damage = np.maximum(1, dict_obs["equipped_items.mainhand.maxDamage"])
+            mainhand_str = dict_obs["equipped_items.mainhand.type"]
+
+        damage_ratio = np.array(
+            [
+                damage / max_damage,
+            ]
         )
-        mainhand_strs = dict_obs["equipped_items.mainhand.type"]
-        mainhand_item = np.zeros_like(mainhand_strs, dtype=np.int32)
-        for i, hand_item_str in enumerate(mainhand_strs):
-            mainhand_item[i] = self.hand_items_map[str(hand_item_str)]
+        direct_features.append(
+            damage_ratio,
+        )
+        mainhand_item = self.hand_items_map[str(mainhand_str)]
 
         direct_features.append(one_hot_encode(mainhand_item, self.num_hand_items))
 
@@ -132,7 +144,7 @@ class ObtainDiamondObservation:
             else:
                 direct_features.append([count / self.max_inventry_count])
 
-        direct_features = np.concatenate(direct_features, axis=1).astype(np.float32)
+        direct_features = np.concatenate(direct_features, axis=0).astype(np.float32)
 
         obs = (pov_obs, direct_features)
 
